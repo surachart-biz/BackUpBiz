@@ -1,0 +1,35 @@
+[Unit]
+Description=BizConnect ASP.NET Core Web Application
+Documentation=https://docs.microsoft.com/aspnet/core/
+After=network.target
+Wants=network.target
+
+[Service]
+Type=notify
+# Change this path to match your deployment directory
+WorkingDirectory=/var/www/bizconnect
+ExecStart=/var/www/bizconnect/BizConnect
+Restart=always
+RestartSec=10
+KillSignal=SIGINT
+SyslogIdentifier=bizconnect
+User=www-data
+Group=www-data
+
+# Environment variables
+Environment=ASPNETCORE_ENVIRONMENT=Production
+Environment=ASPNETCORE_URLS=http://localhost:5000
+Environment=DOTNET_PRINT_TELEMETRY_MESSAGE=false
+
+# Security settings
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/var/www/bizconnect
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+
+[Install]
+WantedBy=multi-user.target

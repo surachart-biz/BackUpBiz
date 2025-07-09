@@ -1,0 +1,35 @@
+[Unit]
+Description=BizConnect ASP.NET Core Web Application (UAT)
+Documentation=https://docs.microsoft.com/aspnet/core/
+After=network.target
+Wants=network.target
+
+[Service]
+Type=notify
+# Change this path to match your UAT deployment directory
+WorkingDirectory=/var/www/bizconnect-uat
+ExecStart=/var/www/bizconnect-uat/BizConnect
+Restart=always
+RestartSec=10
+KillSignal=SIGINT
+SyslogIdentifier=bizconnect-uat
+User=www-data
+Group=www-data
+
+# Environment variables
+Environment=ASPNETCORE_ENVIRONMENT=UAT
+Environment=ASPNETCORE_URLS=http://localhost:5001
+Environment=DOTNET_PRINT_TELEMETRY_MESSAGE=false
+
+# Security settings
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/var/www/bizconnect-uat
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,219 @@
+stages:
+  - build
+  - test
+  - deploy-uat
+  - deploy-production
+
+variables:
+  DOTNET_VERSION: "8.0"
+  PROJECT_NAME: "BizConnect"
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: "/certs"
+
+# Build stage
+build:
+  stage: build
+  image: mcr.microsoft.com/dotnet/sdk:8.0
+  before_script:
+    - dotnet --version
+  script:
+    - dotnet restore
+    - dotnet build --configuration Release --no-restore
+    - dotnet publish --configuration Release --no-build --output ./publish
+  artifacts:
+    paths:
+      - ./publish/
+    expire_in: 1 hour
+  only:
+    - main
+    - develop
+    - merge_requests
+
+# Test stage
+test:
+  stage: test
+  image: mcr.microsoft.com/dotnet/sdk:8.0
+  before_script:
+    - dotnet --version
+  script:
+    - dotnet restore
+    - dotnet test --configuration Release --no-restore --verbosity normal
+  coverage: '/Total\s*\|\s*(\d+(?:\.\d+)?%)/'
+  only:
+    - main
+    - develop
+    - merge_requests
+
+# Deploy to UAT
+deploy-uat:
+  stage: deploy-uat
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache openssh-client rsync
+    - eval $(ssh-agent -s)
+    - echo "$UAT_SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - ssh-keyscan -H $UAT_SERVER_HOST >> ~/.ssh/known_hosts
+  script:
+    - echo "Deploying to UAT environment..."
+    - |
+      # Stop the application service
+      ssh $UAT_SERVER_USER@$UAT_SERVER_HOST "sudo systemctl stop $PROJECT_NAME-uat || true"
+      
+      # Create backup of current deployment
+      ssh $UAT_SERVER_USER@$UAT_SERVER_HOST "sudo cp -r /var/www/$PROJECT_NAME-uat /var/www/$PROJECT_NAME-uat-backup-$(date +%Y%m%d-%H%M%S) || true"
+      
+      # Upload new files
+      rsync -avz --delete ./publish/ $UAT_SERVER_USER@$UAT_SERVER_HOST:/var/www/$PROJECT_NAME-uat/
+      
+      # Set environment variables
+      ssh $UAT_SERVER_USER@$UAT_SERVER_HOST "
+        sudo tee /var/www/$PROJECT_NAME-uat/appsettings.UAT.json > /dev/null <<EOF
+        {
+          \"ConnectionStrings\": {
+            \"DefaultConnection\": \"Host=$UAT_DB_HOST;Database=$UAT_DB_NAME;Username=$UAT_DB_USER;Password=$UAT_DB_PASSWORD;SSL Mode=Require\"
+          },
+          \"Authentication\": {
+            \"RequireHttps\": true,
+            \"ExpireTimeSpan\": \"02:00:00\",
+            \"SlidingExpiration\": true
+          },
+          \"Application\": {
+            \"Environment\": \"UAT\"
+          },
+          \"Logging\": {
+            \"LogLevel\": {
+              \"Default\": \"Information\",
+              \"Microsoft.AspNetCore\": \"Warning\",
+              \"Microsoft.EntityFrameworkCore\": \"Warning\"
+            }
+          }
+        }
+        EOF
+      "
+      
+      # Set permissions
+      ssh $UAT_SERVER_USER@$UAT_SERVER_HOST "sudo chown -R www-data:www-data /var/www/$PROJECT_NAME-uat"
+      ssh $UAT_SERVER_USER@$UAT_SERVER_HOST "sudo chmod +x /var/www/$PROJECT_NAME-uat/$PROJECT_NAME"
+      
+      # Run database migrations using SQL scripts
+      ssh $UAT_SERVER_USER@$UAT_SERVER_HOST "
+        cd /var/www/$PROJECT_NAME-uat
+        export PGPASSWORD='$UAT_DB_PASSWORD'
+        if [ -d 'Migrations' ]; then
+          echo 'Running database migrations...'
+          for migration_file in Migrations/*.sql; do
+            if [ -f \"\$migration_file\" ]; then
+              echo \"Applying: \$(basename \"\$migration_file\")\"
+              psql -h $UAT_DB_HOST -U $UAT_DB_USER -d $UAT_DB_NAME -f \"\$migration_file\" || echo \"Migration \$(basename \"\$migration_file\") failed or already applied\"
+            fi
+          done
+        else
+          echo 'No Migrations directory found, skipping database migrations'
+        fi
+      "
+      
+      # Start the application service
+      ssh $UAT_SERVER_USER@$UAT_SERVER_HOST "sudo systemctl start $PROJECT_NAME-uat"
+      ssh $UAT_SERVER_USER@$UAT_SERVER_HOST "sudo systemctl enable $PROJECT_NAME-uat"
+      
+      # Verify deployment
+      sleep 10
+      ssh $UAT_SERVER_USER@$UAT_SERVER_HOST "sudo systemctl status $PROJECT_NAME-uat"
+    - echo "UAT deployment completed successfully"
+  dependencies:
+    - build
+  environment:
+    name: uat
+    url: https://uat.bizconnect.yourdomain.com
+  only:
+    - develop
+  when: manual
+
+# Deploy to Production
+deploy-production:
+  stage: deploy-production
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache openssh-client rsync
+    - eval $(ssh-agent -s)
+    - echo "$PROD_SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - ssh-keyscan -H $PROD_SERVER_HOST >> ~/.ssh/known_hosts
+  script:
+    - echo "Deploying to Production environment..."
+    - |
+      # Stop the application service
+      ssh $PROD_SERVER_USER@$PROD_SERVER_HOST "sudo systemctl stop $PROJECT_NAME || true"
+      
+      # Create backup of current deployment
+      ssh $PROD_SERVER_USER@$PROD_SERVER_HOST "sudo cp -r /var/www/$PROJECT_NAME /var/www/$PROJECT_NAME-backup-$(date +%Y%m%d-%H%M%S) || true"
+      
+      # Upload new files
+      rsync -avz --delete ./publish/ $PROD_SERVER_USER@$PROD_SERVER_HOST:/var/www/$PROJECT_NAME/
+      
+      # Set environment variables
+      ssh $PROD_SERVER_USER@$PROD_SERVER_HOST "
+        sudo tee /var/www/$PROJECT_NAME/appsettings.Production.json > /dev/null <<EOF
+        {
+          \"ConnectionStrings\": {
+            \"DefaultConnection\": \"Host=$PROD_DB_HOST;Database=$PROD_DB_NAME;Username=$PROD_DB_USER;Password=$PROD_DB_PASSWORD;SSL Mode=Require;Trust Server Certificate=false\"
+          },
+          \"Authentication\": {
+            \"RequireHttps\": true,
+            \"ExpireTimeSpan\": \"01:00:00\",
+            \"SlidingExpiration\": false
+          },
+          \"Application\": {
+            \"Environment\": \"Production\"
+          },
+          \"Logging\": {
+            \"LogLevel\": {
+              \"Default\": \"Warning\",
+              \"Microsoft.AspNetCore\": \"Warning\",
+              \"Microsoft.EntityFrameworkCore\": \"Error\"
+            }
+          }
+        }
+        EOF
+      "
+      
+      # Set permissions
+      ssh $PROD_SERVER_USER@$PROD_SERVER_HOST "sudo chown -R www-data:www-data /var/www/$PROJECT_NAME"
+      ssh $PROD_SERVER_USER@$PROD_SERVER_HOST "sudo chmod +x /var/www/$PROJECT_NAME/$PROJECT_NAME"
+      
+      # Run database migrations using SQL scripts
+      ssh $PROD_SERVER_USER@$PROD_SERVER_HOST "
+        cd /var/www/$PROJECT_NAME
+        export PGPASSWORD='$PROD_DB_PASSWORD'
+        if [ -d 'Migrations' ]; then
+          echo 'Running database migrations...'
+          for migration_file in Migrations/*.sql; do
+            if [ -f \"\$migration_file\" ]; then
+              echo \"Applying: \$(basename \"\$migration_file\")\"
+              psql -h $PROD_DB_HOST -U $PROD_DB_USER -d $PROD_DB_NAME -f \"\$migration_file\" || echo \"Migration \$(basename \"\$migration_file\") failed or already applied\"
+            fi
+          done
+        else
+          echo 'No Migrations directory found, skipping database migrations'
+        fi
+      "
+      
+      # Start the application service
+      ssh $PROD_SERVER_USER@$PROD_SERVER_HOST "sudo systemctl start $PROJECT_NAME"
+      ssh $PROD_SERVER_USER@$PROD_SERVER_HOST "sudo systemctl enable $PROJECT_NAME"
+      
+      # Verify deployment
+      sleep 10
+      ssh $PROD_SERVER_USER@$PROD_SERVER_HOST "sudo systemctl status $PROJECT_NAME"
+    - echo "Production deployment completed successfully"
+  dependencies:
+    - build
+  environment:
+    name: production
+    url: https://bizconnect.yourdomain.com
+  only:
+    - main
+  when: manual
